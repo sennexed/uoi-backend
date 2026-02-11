@@ -2,7 +2,7 @@ import os
 import random
 from datetime import datetime
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_sqlalchemy import SQLAlchemy
 from PIL import Image, ImageDraw, ImageFont
 import requests
@@ -113,7 +113,7 @@ def approve(discord_id):
     db.session.commit()
 
     return jsonify({"message": "Approved"})
-
+    
 @app.route("/card/<discord_id>")
 def get_card(discord_id):
     user = User.query.filter_by(discord_id=discord_id).first()
@@ -125,14 +125,7 @@ def get_card(discord_id):
 
     card_path = create_card(user, avatar_url)
 
-    return jsonify({
-        "full_name": user.full_name,
-        "nationality": user.nationality,
-        "user_id": user.user_id,
-        "role": user.role,
-        "card_path": card_path
-    })
-
+    return send_file(card_path, mimetype="image/png")
 # ================= STARTUP =================
 
 with app.app_context():
