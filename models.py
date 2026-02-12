@@ -30,4 +30,19 @@ class User(db.Model):
             "issued_at": self.issued_at.isoformat() if self.issued_at else None,
             "created_at": self.created_at.isoformat()
         }
-      
+
+class GuildConfig(db.Model):
+    __tablename__ = 'guild_configs'
+
+    id = db.Column(db.Integer, primary_key=True)
+    guild_id = db.Column(db.String(50), unique=True, nullable=False)
+    registration_channel_id = db.Column(db.String(50), nullable=True)
+    approval_channel_id = db.Column(db.String(50), nullable=True)
+
+    def to_dict(self):
+        return {
+            "guild_id": self.guild_id,
+            "registration_channel_id": self.registration_channel_id,
+            "approval_channel_id": self.approval_channel_id
+        }
+        
