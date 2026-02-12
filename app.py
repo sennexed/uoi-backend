@@ -6,7 +6,7 @@ import io
 import bcrypt
 from datetime import datetime
 from flask import Flask, request, jsonify, send_file
-from models import db, User
+from models import db, User, GuildConfig
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 import requests
 
@@ -69,6 +69,29 @@ def update_status():
     db.session.commit()
     return jsonify(user.to_dict()), 200
 
+@app.route('/config/<guild_id>', methods=['GET'])
+def get_config(guild_id):
+    config = GuildConfig.query.filter_by(guild_id=guild_id).first()
+    if not config:
+        return jsonify({"error": "Config not found"}), 404
+    return jsonify(config.to_dict()), 200
+
+@app.route('/config', methods=['POST'])
+def set_config():
+    data = request.json
+    guild_id = data.get('guild_id')
+    config = GuildConfig.query.filter_by(guild_id=guild_id).first()
+    
+    if not config:
+        config = GuildConfig(guild_id=guild_id)
+        db.session.add(config)
+    
+    config.registration_channel_id = data.get('registration_channel_id')
+    config.approval_channel_id = data.get('approval_channel_id')
+    
+    db.session.commit()
+    return jsonify(config.to_dict()), 200
+
 @app.route('/generate_card/<discord_id>', methods=['GET'])
 def generate_card(discord_id):
     user = User.query.filter_by(discord_id=discord_id).first()
@@ -77,29 +100,23 @@ def generate_card(discord_id):
 
     avatar_url = request.args.get('avatar_url')
     
-    # Create Canvas
     width, height = 800, 500
     card = Image.new('RGB', (width, height), color=(255, 255, 255))
     draw = ImageDraw.Draw(card)
 
-    # Theme Colors
     BLUE_DARK = (20, 50, 120)
     BLUE_LIGHT = (230, 240, 255)
 
-    # Background Design
     draw.rectangle([0, 0, width, 120], fill=BLUE_DARK)
     draw.rectangle([0, 120, width, height], fill=BLUE_LIGHT)
 
-    # Watermark
     try:
-        wm_font = ImageFont.load_default() # In production, use a TTF font
+        wm_font = ImageFont.load_default()
         draw.text((width//2, height//2), "UNION OF INDIANS", fill=(200, 210, 230), font=wm_font, anchor="mm")
     except: pass
 
-    # Header Text
     draw.text((width//2, 60), "UNION OF INDIANS - MEMBERSHIP CARD", fill=(255, 255, 255), anchor="mm")
 
-    # Avatar
     if avatar_url:
         try:
             response = requests.get(avatar_url)
@@ -117,7 +134,6 @@ def generate_card(discord_id):
         except:
             draw.ellipse((50, 160, 200, 310), outline=BLUE_DARK, width=2)
 
-    # Fields
     x_offset = 240
     y_start = 160
     line_height = 40
@@ -136,7 +152,6 @@ def generate_card(discord_id):
         draw.text((x_offset, y_start + i * line_height), f"{label}:", fill=BLUE_DARK)
         draw.text((x_offset + 150, y_start + i * line_height), str(val), fill=(0, 0, 0))
 
-    # Save to buffer
     img_byte_arr = io.BytesIO()
     card.save(img_byte_arr, format='PNG')
     img_byte_arr.seek(0)
