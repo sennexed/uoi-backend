@@ -29,11 +29,28 @@ def generate_public_id():
 def register():
     data = request.json
     try:
-        if User.query.filter_by(discord_id=data['discord_id']).first():
-            return jsonify({"error": "User already registered"}), 400
-
-        hashed = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        existing_user = User.query.filter_by(discord_id=data['discord_id']).first()
         
+        # Check existing user status
+        if existing_user:
+            if existing_user.status == "active":
+                return jsonify({"error": "User already has an active ID"}), 400
+            if existing_user.status == "pending":
+                return jsonify({"error": "Registration already pending"}), 400
+            
+            # If status is "rejected" or "revoked", allow updating the record
+            if existing_user.status in ["rejected", "revoked"]:
+                hashed = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+                existing_user.full_name = data['full_name']
+                existing_user.nationality = data['nationality']
+                existing_user.password_hash = hashed
+                existing_user.status = "pending"
+                # Keep existing user_id
+                db.session.commit()
+                return jsonify(existing_user.to_dict()), 200
+
+        # If user does not exist, create new
+        hashed = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
         new_user = User(
             discord_id=data['discord_id'],
             user_id=generate_public_id(),
@@ -132,7 +149,7 @@ def generate_card(discord_id):
     card = Image.new('RGB', (WIDTH, HEIGHT), color=(255, 255, 255))
     draw = ImageDraw.Draw(card)
 
-    # 1. Premium White Textured Background (Subtle Gradient/Texture simulated by light gray noise)
+    # 1. Premium White Textured Background
     draw.rectangle([0, 0, WIDTH, HEIGHT], fill=OFF_WHITE)
     
     # 2. Top Header Section
@@ -140,7 +157,6 @@ def generate_card(discord_id):
     
     # 3. Header Text
     try:
-        # Note: Default font is tiny. In a real environment, load a TTF.
         draw.text((WIDTH // 2, 60), "UNION OF INDIANS", fill=(255, 255, 255), anchor="mm")
         draw.text((WIDTH // 2, 110), "OFFICIAL IDENTIFICATION CARD", fill=(200, 210, 255), anchor="mm")
     except: pass
@@ -172,7 +188,6 @@ def generate_card(discord_id):
             output = ImageOps.fit(av_img, (AVATAR_SIZE, AVATAR_SIZE), centering=(0.5, 0.5))
             output.putalpha(mask)
             
-            # Double Border for Avatar
             draw.ellipse((AVATAR_X - 5, AVATAR_Y - 5, AVATAR_X + AVATAR_SIZE + 5, AVATAR_Y + AVATAR_SIZE + 5), outline=NAVY_BLUE, width=3)
             draw.ellipse((AVATAR_X - 10, AVATAR_Y - 10, AVATAR_X + AVATAR_SIZE + 10, AVATAR_Y + AVATAR_SIZE + 10), outline=BORDER_COLOR, width=1)
             
@@ -180,7 +195,6 @@ def generate_card(discord_id):
         except:
             draw.ellipse((AVATAR_X, AVATAR_Y, AVATAR_X + AVATAR_SIZE, AVATAR_Y + AVATAR_SIZE), outline=NAVY_BLUE, width=2)
 
-    # Internal Card ID below avatar
     draw.text((AVATAR_X + AVATAR_SIZE // 2, AVATAR_Y + AVATAR_SIZE + 30), f"ID: UOI-{user.user_id}", fill=NAVY_BLUE, anchor="mm")
 
     # 6. Right Section: User Data
@@ -188,7 +202,6 @@ def generate_card(discord_id):
     INFO_Y = 240
     LINE_SPACE = 55
     
-    # Faint Watermark
     draw.text((WIDTH - 250, HEIGHT - 250), "UOI", fill=(230, 230, 230), anchor="mm")
 
     data_fields = [
@@ -217,16 +230,13 @@ def generate_card(discord_id):
     draw.line([50, BOTTOM_Y, WIDTH - 50, BOTTOM_Y], fill=GREEN, width=2)
     draw.text((WIDTH // 2, BOTTOM_Y + 30), "Verified by UOI Authority", fill=(120, 120, 120), anchor="mm")
 
-    # Finalize with Rounded Corners
     card = card.convert("RGBA")
     card = add_rounded_corners(card, 40)
     
-    # Paste the card onto the shadow background
     final_img = Image.new('RGBA', (WIDTH + 40, HEIGHT + 40), (0,0,0,0))
-    final_img.paste(bg, (0, 0)) # The blurred shadow
+    final_img.paste(bg, (0, 0))
     final_img.paste(card, (20, 20), card)
 
-    # Save and send
     img_byte_arr = io.BytesIO()
     final_img.save(img_byte_arr, format='PNG')
     img_byte_arr.seek(0)
