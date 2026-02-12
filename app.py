@@ -109,19 +109,6 @@ def set_config():
     db.session.commit()
     return jsonify(config.to_dict()), 200
 
-def add_rounded_corners(im, rad):
-    circle = Image.new('L', (rad * 2, rad * 2), 0)
-    draw = ImageDraw.Draw(circle)
-    draw.ellipse((0, 0, rad * 2 - 1, rad * 2 - 1), fill=255)
-    alpha = Image.new('L', im.size, 255)
-    w, h = im.size
-    alpha.paste(circle.crop((0, 0, rad, rad)), (0, 0))
-    alpha.paste(circle.crop((0, rad, rad, rad * 2)), (0, h - rad))
-    alpha.paste(circle.crop((rad, 0, rad * 2, rad)), (w - rad, 0))
-    alpha.paste(circle.crop((rad, rad, rad * 2, rad * 2)), (w - rad, h - rad))
-    im.putalpha(alpha)
-    return im
-
 @app.route('/generate_card/<discord_id>', methods=['GET'])
 def generate_card(discord_id):
     user = User.query.filter_by(discord_id=discord_id).first()
@@ -130,115 +117,79 @@ def generate_card(discord_id):
 
     avatar_url = request.args.get('avatar_url')
     
-    # Constants
-    WIDTH, HEIGHT = 1200, 700
-    NAVY_BLUE = (20, 30, 70)
-    OFF_WHITE = (245, 245, 250)
-    TEXT_COLOR = (40, 40, 40)
-    BORDER_COLOR = (200, 200, 200)
-    ORANGE = (255, 153, 51)
-    GREEN = (19, 136, 8)
-    
-    # Create Main Canvas with Shadow Padding
-    bg = Image.new('RGBA', (WIDTH + 40, HEIGHT + 40), (255, 255, 255, 0))
-    shadow = Image.new('RGBA', (WIDTH, HEIGHT), (0, 0, 0, 40))
-    bg.paste(shadow, (25, 25))
-    bg = bg.filter(ImageFilter.GaussianBlur(10))
+    # 1. Load template.png
+    # Path relative to backend/app.py
+    template_path = os.path.join(os.path.dirname(__file__), 'template.png')
+    if not os.path.exists(template_path):
+        return jsonify({"error": "Template file (template.png) missing in backend folder"}), 500
 
-    # Actual Card Image
-    card = Image.new('RGB', (WIDTH, HEIGHT), color=(255, 255, 255))
-    draw = ImageDraw.Draw(card)
-
-    # 1. Premium White Textured Background
-    draw.rectangle([0, 0, WIDTH, HEIGHT], fill=OFF_WHITE)
-    
-    # 2. Top Header Section
-    draw.rectangle([0, 0, WIDTH, 160], fill=NAVY_BLUE)
-    
-    # 3. Header Text
     try:
-        draw.text((WIDTH // 2, 60), "UNION OF INDIANS", fill=(255, 255, 255), anchor="mm")
-        draw.text((WIDTH // 2, 110), "OFFICIAL IDENTIFICATION CARD", fill=(200, 210, 255), anchor="mm")
-    except: pass
+        card = Image.open(template_path).convert("RGBA")
+        draw = ImageDraw.Draw(card)
+    except Exception as e:
+        return jsonify({"error": f"Failed to load template: {str(e)}"}), 500
 
-    # Logo Placeholder
-    draw.ellipse((WIDTH - 140, 30, WIDTH - 40, 130), outline=(255, 255, 255), width=2)
-    draw.text((WIDTH - 90, 80), "UOI", fill=(255, 255, 255), anchor="mm")
+    # 2. FIXED COORDINATES (Adjust these based on your specific template.png layout)
+    # These coordinates assume a high-res template (approx 1200x700).
+    POSITIONS = {
+        "avatar": (80, 230, 300),   # (x, y, size)
+        "full_name": (480, 240),
+        "uoi_id": (660, 295),       # Label-value split often needs offset
+        "nationality": (660, 350),
+        "role": (660, 405),
+        "status": (660, 460),
+        "joined": (660, 515),
+        "issued": (660, 570),
+        "internal_id": (230, 560)   # Alphanumeric ID below avatar
+    }
 
-    # 4. Tricolor Stripe
-    stripe_y = 160
-    stripe_h = 10
-    draw.rectangle([0, stripe_y, WIDTH, stripe_y + stripe_h], fill=ORANGE)
-    draw.rectangle([0, stripe_y + stripe_h, WIDTH, stripe_y + stripe_h * 2], fill=(255, 255, 255))
-    draw.rectangle([0, stripe_y + stripe_h * 2, WIDTH, stripe_y + stripe_h * 3], fill=GREEN)
+    # 3. OVERLAY DYNAMIC FIELDS
+    # Using default font. In production, consider loading a custom TTF for premium look.
+    # Note: Pillow default font doesn't support size, usually you'd use ImageFont.truetype('font.ttf', 32)
+    try:
+        # Placeholder for text rendering - adjust labels and values to match template labels
+        draw.text(POSITIONS["full_name"], user.full_name.upper(), fill=(40, 40, 40))
+        draw.text(POSITIONS["uoi_id"], f"#{user.user_id}", fill=(40, 40, 40))
+        draw.text(POSITIONS["nationality"], user.nationality, fill=(40, 40, 40))
+        draw.text(POSITIONS["role"], user.role.upper(), fill=(40, 40, 40))
+        
+        # Color-coded status
+        status_color = (19, 136, 8) if user.status == "active" else (200, 0, 0)
+        draw.text(POSITIONS["status"], user.status.upper(), fill=status_color)
+        
+        draw.text(POSITIONS["joined"], user.created_at.strftime("%b %d, %Y"), fill=(40, 40, 40))
+        draw.text(POSITIONS["issued"], user.issued_at.strftime("%d/%m/%Y") if user.issued_at else "N/A", fill=(40, 40, 40))
+        
+        # Internal Card ID (Internal Card ID)
+        draw.text(POSITIONS["internal_id"], f"UOI-{user.user_id}", fill=(20, 30, 70), anchor="mm")
+    except Exception as e:
+        print(f"Text overlay error: {e}")
 
-    # 5. Left Section: Circular Avatar
-    AVATAR_SIZE = 300
-    AVATAR_X, AVATAR_Y = 80, 230
+    # 4. OVERLAY CIRCULAR AVATAR
     if avatar_url:
         try:
-            response = requests.get(avatar_url)
+            response = requests.get(avatar_url, timeout=5)
             av_img = Image.open(io.BytesIO(response.content)).convert("RGBA")
-            av_img = av_img.resize((AVATAR_SIZE, AVATAR_SIZE))
             
-            mask = Image.new('L', (AVATAR_SIZE, AVATAR_SIZE), 0)
+            size = POSITIONS["avatar"][2]
+            av_img = av_img.resize((size, size))
+            
+            # Mask for circle
+            mask = Image.new('L', (size, size), 0)
             mask_draw = ImageDraw.Draw(mask)
-            mask_draw.ellipse((0, 0, AVATAR_SIZE, AVATAR_SIZE), fill=255)
+            mask_draw.ellipse((0, 0, size, size), fill=255)
             
-            output = ImageOps.fit(av_img, (AVATAR_SIZE, AVATAR_SIZE), centering=(0.5, 0.5))
+            output = ImageOps.fit(av_img, (size, size), centering=(0.5, 0.5))
             output.putalpha(mask)
             
-            draw.ellipse((AVATAR_X - 5, AVATAR_Y - 5, AVATAR_X + AVATAR_SIZE + 5, AVATAR_Y + AVATAR_SIZE + 5), outline=NAVY_BLUE, width=3)
-            draw.ellipse((AVATAR_X - 10, AVATAR_Y - 10, AVATAR_X + AVATAR_SIZE + 10, AVATAR_Y + AVATAR_SIZE + 10), outline=BORDER_COLOR, width=1)
-            
-            card.paste(output, (AVATAR_X, AVATAR_Y), output)
-        except:
-            draw.ellipse((AVATAR_X, AVATAR_Y, AVATAR_X + AVATAR_SIZE, AVATAR_Y + AVATAR_SIZE), outline=NAVY_BLUE, width=2)
+            # Paste avatar onto template
+            card.paste(output, (POSITIONS["avatar"][0], POSITIONS["avatar"][1]), output)
+        except Exception as e:
+            print(f"Avatar processing error: {e}")
 
-    draw.text((AVATAR_X + AVATAR_SIZE // 2, AVATAR_Y + AVATAR_SIZE + 30), f"ID: UOI-{user.user_id}", fill=NAVY_BLUE, anchor="mm")
-
-    # 6. Right Section: User Data
-    INFO_X = 480
-    INFO_Y = 240
-    LINE_SPACE = 55
-    
-    draw.text((WIDTH - 250, HEIGHT - 250), "UOI", fill=(230, 230, 230), anchor="mm")
-
-    data_fields = [
-        ("NAME", user.full_name.upper()),
-        ("UOI ID", f"#{user.user_id}"),
-        ("NATIONALITY", user.nationality),
-        ("SERVER ROLE", user.role.upper()),
-        ("STATUS", user.status.upper()),
-        ("JOINED", user.created_at.strftime("%b %d, %Y")),
-        ("ISSUED ON", user.issued_at.strftime("%d/%m/%Y") if user.issued_at else "N/A"),
-        ("DISCORD ID", user.discord_id)
-    ]
-
-    for i, (label, val) in enumerate(data_fields):
-        y_pos = INFO_Y + (i * LINE_SPACE)
-        draw.text((INFO_X, y_pos), f"{label}:", fill=(100, 100, 100))
-        
-        val_color = TEXT_COLOR
-        if label == "STATUS":
-            val_color = GREEN if user.status == "active" else (200, 0, 0)
-        
-        draw.text((INFO_X + 180, y_pos), str(val), fill=val_color)
-
-    # 7. Bottom Strip
-    BOTTOM_Y = HEIGHT - 60
-    draw.line([50, BOTTOM_Y, WIDTH - 50, BOTTOM_Y], fill=GREEN, width=2)
-    draw.text((WIDTH // 2, BOTTOM_Y + 30), "Verified by UOI Authority", fill=(120, 120, 120), anchor="mm")
-
-    card = card.convert("RGBA")
-    card = add_rounded_corners(card, 40)
-    
-    final_img = Image.new('RGBA', (WIDTH + 40, HEIGHT + 40), (0,0,0,0))
-    final_img.paste(bg, (0, 0))
-    final_img.paste(card, (20, 20), card)
-
+    # 5. RETURN FINAL IMAGE
     img_byte_arr = io.BytesIO()
-    final_img.save(img_byte_arr, format='PNG')
+    card.save(img_byte_arr, format='PNG')
     img_byte_arr.seek(0)
     
     return send_file(img_byte_arr, mimetype='image/png')
