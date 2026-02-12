@@ -1,182 +1,149 @@
+
 import os
 import random
-import requests
-from io import BytesIO
+import string
+import io
+import bcrypt
 from datetime import datetime
-
 from flask import Flask, request, jsonify, send_file
-from flask_sqlalchemy import SQLAlchemy
-from PIL import Image, ImageDraw, ImageFont
+from models import db, User
+from PIL import Image, ImageDraw, ImageFont, ImageOps
+import requests
 
 app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL').replace("postgres://", "postgresql://", 1)
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-# =============================
-# DATABASE CONFIG
-# =============================
-
-app.config["SQLALCHEMY_DATABASE_URI"] = os.environ.get("DATABASE_URL")
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-
-db = SQLAlchemy(app)
-
-
-# =============================
-# DATABASE MODEL
-# =============================
-
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    discord_id = db.Column(db.String(30), unique=True, nullable=False)
-    full_name = db.Column(db.String(120))
-    nationality = db.Column(db.String(50))
-    user_id = db.Column(db.String(6), unique=True)
-    role = db.Column(db.String(50), default="Member")
-    status = db.Column(db.String(20), default="under_review")
-    issued_at = db.Column(db.DateTime)
-    password = db.Column(db.String(120))
-
+db.init_app(app)
 
 with app.app_context():
     db.create_all()
 
+def generate_public_id():
+    while True:
+        pid = ''.join(random.choices(string.digits, k=6))
+        if not User.query.filter_by(user_id=pid).first():
+            return pid
 
-# =============================
-# CARD GENERATOR
-# =============================
-
-def generate_card(user, avatar_url):
-    width, height = 900, 550
-    card = Image.new("RGB", (width, height), "#ffffff")
-    draw = ImageDraw.Draw(card)
-
-    try:
-        font_title = ImageFont.truetype("arial.ttf", 60)
-        font_text = ImageFont.truetype("arial.ttf", 40)
-        font_small = ImageFont.truetype("arial.ttf", 32)
-    except:
-        font_title = ImageFont.load_default()
-        font_text = ImageFont.load_default()
-        font_small = ImageFont.load_default()
-
-    # Header
-    draw.text((50, 40), "UNION OF INDIANS", fill="#003366", font=font_title)
-    draw.text((50, 120), "Official Identification Card", fill="gray", font=font_small)
-
-    # Avatar
-    response = requests.get(avatar_url)
-    avatar = Image.open(BytesIO(response.content)).convert("RGB")
-    avatar = avatar.resize((250, 250))
-
-    mask = Image.new("L", (250, 250), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, 250, 250), fill=255)
-
-    card.paste(avatar, (60, 200), mask)
-
-    # Details
-    x = 350
-    y = 200
-
-    draw.text((x, y), user.full_name, fill="black", font=font_text)
-    y += 70
-    draw.text((x, y), f"UOI ID: {user.user_id}", fill="black", font=font_small)
-    y += 60
-    draw.text((x, y), f"Nationality: {user.nationality}", fill="black", font=font_small)
-    y += 60
-    draw.text((x, y), f"Role: {user.role}", fill="black", font=font_small)
-    y += 60
-    draw.text((x, y), f"Status: {user.status}", fill="black", font=font_small)
-    y += 60
-    draw.text((x, y), f"Issued: {user.issued_at.strftime('%Y-%m-%d')}", fill="black", font=font_small)
-
-    if not os.path.exists("cards"):
-        os.makedirs("cards")
-
-    file_path = f"cards/{user.discord_id}.png"
-    card.save(file_path)
-
-    return file_path
-
-
-# =============================
-# ROUTES
-# =============================
-
-@app.route("/")
-def home():
-    return "UOI Backend Working"
-
-
-@app.route("/register", methods=["POST"])
+@app.route('/register', methods=['POST'])
 def register():
     data = request.json
+    try:
+        if User.query.filter_by(discord_id=data['discord_id']).first():
+            return jsonify({"error": "User already registered"}), 400
 
-    existing = User.query.filter_by(discord_id=data["discord_id"]).first()
-    if existing:
-        return jsonify({"error": "Already registered"}), 400
+        hashed = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+        
+        new_user = User(
+            discord_id=data['discord_id'],
+            user_id=generate_public_id(),
+            full_name=data['full_name'],
+            nationality=data['nationality'],
+            password_hash=hashed,
+            status="pending"
+        )
+        db.session.add(new_user)
+        db.session.commit()
+        return jsonify(new_user.to_dict()), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    new_user = User(
-        discord_id=data["discord_id"],
-        full_name=data["full_name"],
-        nationality=data["nationality"],
-        user_id=str(random.randint(100000, 999999)),
-        password=data["password"],
-        status="under_review"
-    )
-
-    db.session.add(new_user)
-    db.session.commit()
-
-    return jsonify({"message": "Registration submitted"})
-
-
-@app.route("/approve/<discord_id>", methods=["POST"])
-def approve(discord_id):
+@app.route('/status/<discord_id>', methods=['GET'])
+def get_status(discord_id):
     user = User.query.filter_by(discord_id=discord_id).first()
-
     if not user:
         return jsonify({"error": "User not found"}), 404
+    return jsonify({"status": user.status, "user": user.to_dict()}), 200
 
-    user.status = "active"
-    user.issued_at = datetime.utcnow()
-    db.session.commit()
-
-    return jsonify({"message": "Approved"})
-
-
-@app.route("/revoke/<discord_id>", methods=["POST"])
-def revoke(discord_id):
-    user = User.query.filter_by(discord_id=discord_id).first()
-
+@app.route('/update_status', methods=['POST'])
+def update_status():
+    data = request.json
+    user = User.query.filter_by(discord_id=data['discord_id']).first()
     if not user:
         return jsonify({"error": "User not found"}), 404
-
-    user.status = "revoked"
+    
+    user.status = data['status']
+    if data['status'] == "active":
+        user.issued_at = datetime.utcnow()
+    
     db.session.commit()
+    return jsonify(user.to_dict()), 200
 
-    return jsonify({"message": "Revoked"})
-
-
-@app.route("/status/<discord_id>")
-def status(discord_id):
+@app.route('/generate_card/<discord_id>', methods=['GET'])
+def generate_card(discord_id):
     user = User.query.filter_by(discord_id=discord_id).first()
-
-    if not user:
-        return jsonify({"error": "Not registered"}), 404
-
-    return jsonify({"status": user.status})
-
-
-@app.route("/card/<discord_id>")
-def card(discord_id):
-    user = User.query.filter_by(discord_id=discord_id).first()
-
     if not user or user.status != "active":
-        return jsonify({"error": "Card not available"}), 404
+        return jsonify({"error": "Card not available or user not active"}), 403
 
-    avatar_url = request.args.get("avatar")
+    avatar_url = request.args.get('avatar_url')
+    
+    # Create Canvas
+    width, height = 800, 500
+    card = Image.new('RGB', (width, height), color=(255, 255, 255))
+    draw = ImageDraw.Draw(card)
 
-    file_path = generate_card(user, avatar_url)
+    # Theme Colors
+    BLUE_DARK = (20, 50, 120)
+    BLUE_LIGHT = (230, 240, 255)
 
-    return send_file(file_path, mimetype="image/png")
+    # Background Design
+    draw.rectangle([0, 0, width, 120], fill=BLUE_DARK)
+    draw.rectangle([0, 120, width, height], fill=BLUE_LIGHT)
 
+    # Watermark
+    try:
+        wm_font = ImageFont.load_default() # In production, use a TTF font
+        draw.text((width//2, height//2), "UNION OF INDIANS", fill=(200, 210, 230), font=wm_font, anchor="mm")
+    except: pass
 
+    # Header Text
+    draw.text((width//2, 60), "UNION OF INDIANS - MEMBERSHIP CARD", fill=(255, 255, 255), anchor="mm")
+
+    # Avatar
+    if avatar_url:
+        try:
+            response = requests.get(avatar_url)
+            av_img = Image.open(io.BytesIO(response.content)).convert("RGBA")
+            av_img = av_img.resize((150, 150))
+            
+            mask = Image.new('L', (150, 150), 0)
+            mask_draw = ImageDraw.Draw(mask)
+            mask_draw.ellipse((0, 0, 150, 150), fill=255)
+            
+            output = ImageOps.fit(av_img, (150, 150), centering=(0.5, 0.5))
+            output.putalpha(mask)
+            
+            card.paste(output, (50, 160), output)
+        except:
+            draw.ellipse((50, 160, 200, 310), outline=BLUE_DARK, width=2)
+
+    # Fields
+    x_offset = 240
+    y_start = 160
+    line_height = 40
+    
+    fields = [
+        ("Full Name", user.full_name),
+        ("UOI ID", user.user_id),
+        ("Nationality", user.nationality),
+        ("Role", user.role.upper()),
+        ("Status", user.status.upper()),
+        ("Issued Date", user.issued_at.strftime("%Y-%m-%d") if user.issued_at else "N/A"),
+        ("Discord ID", user.discord_id)
+    ]
+
+    for i, (label, val) in enumerate(fields):
+        draw.text((x_offset, y_start + i * line_height), f"{label}:", fill=BLUE_DARK)
+        draw.text((x_offset + 150, y_start + i * line_height), str(val), fill=(0, 0, 0))
+
+    # Save to buffer
+    img_byte_arr = io.BytesIO()
+    card.save(img_byte_arr, format='PNG')
+    img_byte_arr.seek(0)
+    
+    return send_file(img_byte_arr, mimetype='image/png')
+
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port)
+    
