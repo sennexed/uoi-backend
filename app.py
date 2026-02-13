@@ -112,14 +112,13 @@ def set_config():
 @app.route('/generate_card/<discord_id>', methods=['GET'])
 def generate_card(discord_id):
     user = User.query.filter_by(discord_id=discord_id).first()
-    # Allowing access to generate preview even if pending/rejected for debugging/system needs, 
-    # but based on prompt logic, we usually only return active.
-    if not user:
-        return jsonify({"error": "User not found"}), 404
+    if not user or user.status != "active":
+        return jsonify({"error": "Card not available or user not active"}), 403
 
     avatar_url = request.args.get('avatar_url')
     
-    # 1. Load template.png (900x550)
+    # 1. Load template.png
+    # Path relative to backend/app.py
     template_path = os.path.join(os.path.dirname(__file__), 'template.png')
     if not os.path.exists(template_path):
         return jsonify({"error": "Template file (template.png) missing in backend folder"}), 500
@@ -130,86 +129,66 @@ def generate_card(discord_id):
     except Exception as e:
         return jsonify({"error": f"Failed to load template: {str(e)}"}), 500
 
-    # Colors
-    NAVY = (27, 42, 78)      # #1b2a4e
-    GRAY = (51, 51, 51)      # #333333
-    GREEN = (30, 126, 52)    # #1e7e34
-    RED = (200, 35, 51)      # #c82333
-    ORANGE = (253, 126, 20)  # #fd7e14
+    # 2. FIXED COORDINATES (Adjust these based on your specific template.png layout)
+    # These coordinates assume a high-res template (approx 1200x700).
+    POSITIONS = {
+        "avatar": (80, 230, 300),   # (x, y, size)
+        "full_name": (480, 240),
+        "uoi_id": (660, 295),       # Label-value split often needs offset
+        "nationality": (660, 350),
+        "role": (660, 405),
+        "status": (660, 460),
+        "joined": (660, 515),
+        "issued": (660, 570),
+        "internal_id": (230, 560)   # Alphanumeric ID below avatar
+    }
 
-    # 2. OVERLAY DYNAMIC TEXT
-    # Using standard fonts - in production place a .ttf file in backend/ and use ImageFont.truetype
-    # For now fallback to default or generic search.
+    # 3. OVERLAY DYNAMIC FIELDS
+    # Using default font. In production, consider loading a custom TTF for premium look.
+    # Note: Pillow default font doesn't support size, usually you'd use ImageFont.truetype('font.ttf', 32)
     try:
-        # Note: PIL default font is tiny and doesn't support size. 
-        # For a production look, we expect a font file. Fallback logic provided.
-        font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-        if not os.path.exists(font_path):
-             font_path = "arial.ttf" # Windows fallback
-
-        try:
-            name_font = ImageFont.truetype(font_path, 36)
-            info_font = ImageFont.truetype(font_path, 24)
-            small_font = ImageFont.truetype(font_path, 14)
-        except:
-            name_font = ImageFont.load_default()
-            info_font = ImageFont.load_default()
-            small_font = ImageFont.load_default()
-
-        # Full Name
-        draw.text((350, 200), user.full_name.upper(), fill=NAVY, font=name_font)
+        # Placeholder for text rendering - adjust labels and values to match template labels
+        draw.text(POSITIONS["full_name"], user.full_name.upper(), fill=(40, 40, 40))
+        draw.text(POSITIONS["uoi_id"], f"#{user.user_id}", fill=(40, 40, 40))
+        draw.text(POSITIONS["nationality"], user.nationality, fill=(40, 40, 40))
+        draw.text(POSITIONS["role"], user.role.upper(), fill=(40, 40, 40))
         
-        # Fields
-        draw.text((350, 260), f"UOI ID: #{user.user_id}", fill=GRAY, font=info_font)
-        draw.text((350, 310), f"Nationality: {user.nationality}", fill=GRAY, font=info_font)
-        draw.text((350, 360), f"Role: {user.role.upper()}", fill=GRAY, font=info_font)
+        # Color-coded status
+        status_color = (19, 136, 8) if user.status == "active" else (200, 0, 0)
+        draw.text(POSITIONS["status"], user.status.upper(), fill=status_color)
         
-        # Status
-        status_text = user.status.upper()
-        status_color = GRAY
-        if status_text == "ACTIVE": status_color = GREEN
-        elif status_text == "REJECTED": status_color = RED
-        elif status_text in ["REVOKED", "REVOKE"]: status_color = ORANGE
+        draw.text(POSITIONS["joined"], user.created_at.strftime("%b %d, %Y"), fill=(40, 40, 40))
+        draw.text(POSITIONS["issued"], user.issued_at.strftime("%d/%m/%Y") if user.issued_at else "N/A", fill=(40, 40, 40))
         
-        draw.text((350, 410), f"Status: {status_text}", fill=status_color, font=info_font)
-        
-        # Issued Date
-        issued_str = user.issued_at.strftime("%d/%m/%Y") if user.issued_at else "PENDING"
-        draw.text((350, 460), f"Issued On: {issued_str}", fill=GRAY, font=info_font)
-        
-        # Internal ID
-        draw.text((70, 500), f"UOI-{user.user_id}", fill=GRAY, font=small_font)
-
+        # Internal Card ID (Internal Card ID)
+        draw.text(POSITIONS["internal_id"], f"UOI-{user.user_id}", fill=(20, 30, 70), anchor="mm")
     except Exception as e:
-        print(f"Overlay text error: {e}")
+        print(f"Text overlay error: {e}")
 
-    # 3. OVERLAY CIRCULAR AVATAR
+    # 4. OVERLAY CIRCULAR AVATAR
     if avatar_url:
         try:
             response = requests.get(avatar_url, timeout=5)
             av_img = Image.open(io.BytesIO(response.content)).convert("RGBA")
             
-            AV_SIZE = 250
-            AV_POS = (60, 200)
+            size = POSITIONS["avatar"][2]
+            av_img = av_img.resize((size, size))
             
-            av_img = av_img.resize((AV_SIZE, AV_SIZE), Image.Resampling.LANCZOS)
-            
-            # Circular Mask
-            mask = Image.new('L', (AV_SIZE, AV_SIZE), 0)
+            # Mask for circle
+            mask = Image.new('L', (size, size), 0)
             mask_draw = ImageDraw.Draw(mask)
-            mask_draw.ellipse((0, 0, AV_SIZE, AV_SIZE), fill=255)
+            mask_draw.ellipse((0, 0, size, size), fill=255)
             
-            output = ImageOps.fit(av_img, (AV_SIZE, AV_SIZE), centering=(0.5, 0.5))
+            output = ImageOps.fit(av_img, (size, size), centering=(0.5, 0.5))
             output.putalpha(mask)
             
-            # Paste into placeholder
-            card.paste(output, AV_POS, output)
+            # Paste avatar onto template
+            card.paste(output, (POSITIONS["avatar"][0], POSITIONS["avatar"][1]), output)
         except Exception as e:
             print(f"Avatar processing error: {e}")
 
-    # 4. RETURN FINAL IMAGE
+    # 5. RETURN FINAL IMAGE
     img_byte_arr = io.BytesIO()
-    # Save as PNG to maintain transparency/quality
     card.save(img_byte_arr, format='PNG')
     img_byte_arr.seek(0)
     
@@ -218,4 +197,3 @@ def generate_card(discord_id):
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
-    
